@@ -1,11 +1,26 @@
+"""
+ Copyright 2023 Shengjie Zhu
+
+ Licensed under the GNU GENERAL PUBLIC LICENSE, Version 3 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+      https://www.gnu.org/licenses/
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ """
+
 import GPUEPM
-import torch, copy, kornia
+import torch, kornia
 import numpy as np
 import torch.nn as nn
 
 from kornia.geometry.epipolar.essential import cross_product_matrix
 from GPUEPMatrixEstimation.gpuepm import gpuepm_function
-from numba import njit
 
 def padding_pose(poses_w2c):
     B, mh, mw = poses_w2c.shape
@@ -14,20 +29,6 @@ def padding_pose(poses_w2c):
     poses_w2c_[:, 0:mh, 0:mw] = poses_w2c
     return poses_w2c_.contiguous()
 
-@njit
-def vote_for_optimal_scale(voting_vector, minfillidx, maxfillidx, valid, topk, npts):
-    for i in range(topk):
-        for j in range(npts):
-            if valid[i, j, 0]:
-                minidx = minfillidx[i, j, 0]
-                maxidx = maxfillidx[i, j, 0]
-
-                if minidx > maxidx:
-                    continue
-
-                for fillidx in range(minidx, maxidx + 1):
-                    voting_vector[i, fillidx] += 1
-    return voting_vector
 class PoseEstimator(nn.Module):
     def __init__(self, npts=10000, device=None):
         # Points Sampled

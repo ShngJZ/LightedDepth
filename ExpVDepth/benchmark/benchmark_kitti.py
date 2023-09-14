@@ -166,8 +166,8 @@ def validate_kitti(raft, lighteddepth, args, iters=24):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--raft_ckpt',                  help="checkpoint of RAFT",              type=str,   default='misc/checkpoints/raft-sintel.pth')
-    parser.add_argument('--ldepth_ckpt',                help="checkpoint of LightedDepth",      type=str,   default='misc/checkpoints/lighteddepth_kitti.pth')
+    parser.add_argument('--raft_ckpt',                  help="checkpoint of RAFT",              type=str,   default=os.path.join(project_root, 'misc/checkpoints/raft-sintel.pth'))
+    parser.add_argument('--ldepth_ckpt',                help="checkpoint of LightedDepth",      type=str,   default=os.path.join(project_root, 'misc/checkpoints/lighteddepth_kitti.pth'))
 
     parser.add_argument('--kitti_root',                 help="root of kitti",                   type=str,   default=os.path.join(project_root, 'data', 'kitti'))
     parser.add_argument('--grdt_depth_root',            help="root of grdt_depth",              type=str,   default=os.path.join(project_root, 'data', 'smidensegt_kitti'))
@@ -182,6 +182,8 @@ if __name__ == '__main__':
     parser.add_argument('--scale_th',                                                           type=float, default=0.0)
 
     args = parser.parse_args()
+
+    assert args.mono_depth_init in ['bts', 'adabins', 'newcrfs', 'monodepth2']
 
     raft = RAFT(args)
     raft.load_state_dict(torch.load(args.raft_ckpt, map_location="cpu"), strict=True)

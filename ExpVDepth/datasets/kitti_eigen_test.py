@@ -5,7 +5,7 @@ sys.path.insert(0, project_rootdir)
 import numpy as np
 import PIL.Image as Image
 
-import torch, torchvision
+import torch
 import torch.utils.data as data
 from utils.utils import read_calib_file, get_intrinsic_extrinsic
 

@@ -1,3 +1,19 @@
+"""
+ Copyright 2023 Shengjie Zhu
+
+ Licensed under the GNU GENERAL PUBLIC LICENSE, Version 3 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+      https://www.gnu.org/licenses/
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ """
+
 import torch
 import GPUEPM
 
@@ -11,11 +27,12 @@ def gpuepm_function(kpts0, kpts1, ransac_iter=5, ransac_threshold=0.0001, num_te
         ransac_iter: Local RANSAC Iteration, Global Iteration is Fixed as 512 x ransac_iter
         ransac_threshold: RANSAC threshold
         num_test_chirality: Five Point Algorithm Chirality Check Points
+        topk: return topk poses
 
     Returns:
         R: Rotation Matrix
         t: Normalized Translation Vector
-        inliers: indicator vector suggest inlier ---- 1: inlier, 0: outlier. All Zeros suggest failure cases
+        inliers: indicator vector suggest inlier ---- 1: inlier, 0: outlier. All Zeros suggest degenerated cases
     '''
     ransac_test_points = kpts0.shape[0]
     # Homogeneous Coordinates will Cause Unspecified Behavior
