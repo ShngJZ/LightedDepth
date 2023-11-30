@@ -1,5 +1,7 @@
 import os, pickle
 import numpy as np
+import warnings
+
 
 import torch
 import torch.nn as nn
@@ -279,8 +281,17 @@ class LightedDepthNet(nn.Module):
         self.decoder = Decoder()
         self.vdepthhead = VDepthHead(self.args)
 
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'LogResBins.pickle'), 'rb') as f:
-            logresbins = pickle.load(f)
+
+        if args.dataset_type == "kitti":
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'LogResBinsKITTI.pickle'), 'rb') as f:
+                logresbins = pickle.load(f)
+        elif args.dataset_type == "nyuv2":
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'LogResBinsNYUv2.pickle'), 'rb') as f:
+                logresbins = pickle.load(f)
+        else:
+            warnings.warn("LogResBins Undefined, Use NYUv2 for initialization")
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'LogResBinsNYUv2.pickle'), 'rb') as f:
+                logresbins = pickle.load(f)
 
         self.nedges = len(logresbins)
 

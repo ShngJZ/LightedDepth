@@ -12,27 +12,26 @@ from tabulate import tabulate
 import torch
 import torch.utils.data as data
 from utils.utils import InputPadder, to_cuda, readFlowKITTI, writeFlowKITTI
-from utils.evaluation import compute_errors
+from utils.evaluation import compute_errors, upgrade_measures
 from utils.pose_estimator import PoseEstimator
 
 from ExpVDepth.RAFT.raft import RAFT
 from ExpVDepth.LDNet.LightedDepthNet import LightedDepthNet
 from ExpVDepth.datasets.kitti_eigen_test import KITTI_eigen
 
+def is_valid_pose(pose):
+    # KITTI dataset assumes camera always move forwards
+    pose = pose.squeeze()
+    R, t = pose[0:3, 0:3], pose[0:3, 3:4]
+    if R[0, 0] < 0 or R[1, 1] < 0 or R[2, 2] < 0 or t[2] > 0:
+        return False
+    else:
+        return True
+
 def read_splits_kitti_test():
     split_root = os.path.join(project_root, 'misc', 'kitti_splits')
     entries = [x.rstrip('\n') for x in open(os.path.join(split_root, 'test_files.txt'), 'r')]
     return entries
-def upgrade_measures(vdepth, gtdepth, selector, measures, SfM=False):
-    vdepthf = vdepth[selector == 1]
-    gtdepthf = gtdepth[selector == 1]
-
-    if SfM:
-        vdepthf = vdepthf * np.median(gtdepthf) / np.median(vdepthf)
-
-    measures[:10] += compute_errors(gt=gtdepthf, pred=vdepthf)
-    measures[10] += 1
-    return measures
 
 @torch.no_grad()
 def validate_kitti(raft, lighteddepth, args, iters=24):
@@ -51,7 +50,7 @@ def validate_kitti(raft, lighteddepth, args, iters=24):
         data_root=args.kitti_root,
         entries=read_splits_kitti_test(),
         net_ht=args.net_ht, net_wd=args.net_wd,
-        mono_depth_root=os.path.join(args.estimated_inputs_root, 'monodepth_kitti', args.mono_depth_init),
+        mono_depth_root=os.path.join(args.est_inputs_root, 'monodepth_kitti', args.mono_depth_method),
         grdt_depth_root=args.grdt_depth_root
     )
     val_loader = data.DataLoader(
@@ -103,7 +102,7 @@ def validate_kitti(raft, lighteddepth, args, iters=24):
             padder = InputPadder(image1.shape, mode='kitti')
             image1, image2 = padder.pad(image1, image2)
 
-            flow_root = os.path.join(args.estimated_inputs_root, 'opticalflow_kitti', args.flow_init, seq)
+            flow_root = os.path.join(args.est_inputs_root, 'opticalflow_kitti', args.flow_init, seq)
             flow_path = os.path.join(flow_root, '{}_{}.png'.format(str(img1_idx).zfill(10), str(img2_idx).zfill(10)))
             if not os.path.exists(flow_path):
                 os.makedirs(flow_root, exist_ok=True)
@@ -118,9 +117,10 @@ def validate_kitti(raft, lighteddepth, args, iters=24):
                 flow = torch.from_numpy(flownp).float().cuda()
 
             mdepth_uncropped, intrinsic_uncropped = data_blob['mono_depth_uncropped'].squeeze(), data_blob['intrinsic_uncropped'].squeeze()
-            pose, scale_md = pose_estimator.pose_estimation(flow, mdepth_uncropped, intrinsic_uncropped[0:3, 0:3], seed=val_id)
-
-            if scale_md > args.scale_th:
+            valid_regeion = torch.zeros([h, w], device=mdepth_uncropped.device, dtype=torch.bool)
+            valid_regeion[int(0.25810811 * h):int(0.99189189 * h)] = 1
+            pose, scale_md = pose_estimator.pose_estimation(flow, mdepth_uncropped, intrinsic_uncropped[0:3, 0:3], valid_regeion=valid_regeion, seed=val_id)
+            if is_valid_pose(pose):
                 break
             else:
                 interval += 1
@@ -166,24 +166,25 @@ def validate_kitti(raft, lighteddepth, args, iters=24):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--raft_ckpt',                  help="checkpoint of RAFT",              type=str,   default=os.path.join(project_root, 'misc/checkpoints/raft-sintel.pth'))
-    parser.add_argument('--ldepth_ckpt',                help="checkpoint of LightedDepth",      type=str,   default=os.path.join(project_root, 'misc/checkpoints/lighteddepth_kitti.pth'))
+    parser.add_argument('--raft_ckpt',                  help="checkpoint of RAFT",                      type=str,   default=os.path.join(project_root, 'misc/checkpoints/raft-sintel.pth'))
+    parser.add_argument('--ldepth_ckpt',                help="checkpoint of LightedDepth",              type=str,   default=os.path.join(project_root, 'misc/checkpoints/lighteddepth_kitti.pth'))
 
-    parser.add_argument('--kitti_root',                 help="root of kitti",                   type=str,   default=os.path.join(project_root, 'data', 'kitti'))
-    parser.add_argument('--grdt_depth_root',            help="root of grdt_depth",              type=str,   default=os.path.join(project_root, 'data', 'smidensegt_kitti'))
-    parser.add_argument('--estimated_inputs_root',      help="root of estimated_inputs",        type=str,   default=os.path.join(project_root, 'estimated_inputs'))
-    parser.add_argument('--mono_depth_init',            help="method name of mono_depth",       type=str,   default='bts')
-    parser.add_argument('--flow_init',                  help="method name of optical flow",     type=str,   default='raft')
+    parser.add_argument('--kitti_root',                 help="root of kitti",                           type=str,   default=os.path.join(project_root, 'data', 'kitti'))
+    parser.add_argument('--grdt_depth_root',            help="root of grdt_depth",                      type=str,   default=os.path.join(project_root, 'data', 'semidensegt_kitti'))
+    parser.add_argument('--est_inputs_root',            help="root of estimated_inputs",                type=str,   default=os.path.join(project_root, 'estimated_inputs'))
+    parser.add_argument('--mono_depth_method',          help="method name of mono_depth",               type=str,   default='bts')
+    parser.add_argument('--flow_init',                  help="method name of optical flow",             type=str,   default='raft')
 
-    parser.add_argument('--net_ht',                                                             type=int,   default=320)
-    parser.add_argument('--net_wd',                                                             type=int,   default=1216)
-    parser.add_argument('--min_depth_pred',                                                     type=float, default=1)
-    parser.add_argument('--maxlogscale',                                                        type=float, default=1.5)
-    parser.add_argument('--scale_th',                                                           type=float, default=0.0)
+    parser.add_argument('--net_ht',                                                                     type=int,   default=320)
+    parser.add_argument('--net_wd',                                                                     type=int,   default=1216)
+    parser.add_argument('--min_depth_pred',             help="minimal evaluate depth",                  type=float, default=1)
+    parser.add_argument('--maxlogscale',                help="maximum stereo residual value",           type=float, default=1.5)
+    parser.add_argument('--scale_th',                   help="minimal camera translation magnitude",    type=float, default=0.0)
+    parser.add_argument('--dataset_type',               help="which experiment dataset",                type=str,   default="kitti")
 
     args = parser.parse_args()
 
-    assert args.mono_depth_init in ['bts', 'adabins', 'newcrfs', 'monodepth2']
+    assert args.mono_depth_method in ['bts', 'adabins', 'newcrfs', 'monodepth2']
 
     raft = RAFT(args)
     raft.load_state_dict(torch.load(args.raft_ckpt, map_location="cpu"), strict=True)

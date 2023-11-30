@@ -83,6 +83,7 @@ def writeFlowKITTI(filename, uv):
     valid = np.ones([uv.shape[0], uv.shape[1], 1])
     uv = np.concatenate([uv, valid], axis=-1).astype(np.uint16)
     cv2.imwrite(filename, uv[..., ::-1])
+
 def to_cuda(data_blob):
     for k in data_blob.keys():
         if isinstance(data_blob[k], torch.Tensor):

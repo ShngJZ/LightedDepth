@@ -30,7 +30,29 @@ def padding_pose(poses_w2c):
     return poses_w2c_.contiguous()
 
 class PoseEstimator(nn.Module):
-    def __init__(self, npts=10000, device=None):
+    def __init__(
+            self,
+            npts=10000,
+            device=None,
+            prj_w=0.05,
+            maxscale_vote=5.0,
+            precision=0.01,
+            ransac_threshold=0.0001,
+            scale_th=1,
+            topk=5
+    ):
+
+        """
+        npts: RANSAC Sampled Points
+        device: GPU Device Handler
+        prj_w: weight of projection inliers (in additional to epp inliers)
+        maxscale_vote: max camera movement distance between two frames, share unit with depthmap
+        precision: resolution of voting, smaller requires more memory. Performance is insensitive to this parameter once sufficiently large.
+        ransac_threshold: threshold in Sampson Error, defined in normalized pixel coordinates
+        scale_th: beyond pixel distance scale_th, the projection is no longer considered an inlier in camera scale voting
+        topk: top k candidates to apply the additional projection consrtaint
+        """
+
         # Points Sampled
         self.npts, self.device = npts, device
 
@@ -41,50 +63,35 @@ class PoseEstimator(nn.Module):
         self.ignore_regeion = dict()
 
         # Scale Estimate Inlier Threshold
-        self.scale_th, self.topk, self.eps = 1, 5, 1e-10
+        self.scale_th, self.topk, self.eps = scale_th, topk, 1e-10
 
         # Assign Precision of Voting
-        self.maxscale_vote, self.precision = 5.0, 0.01
+        self.maxscale_vote, self.precision = maxscale_vote, precision
 
         # Prj Constraint
-        self.prj_w = 0.05
+        self.prj_w = prj_w
+
+        self.ransac_threshold = ransac_threshold
 
     def generate_voting_vector(self, device):
         voting_vector = torch.zeros([self.topk, int(self.maxscale_vote / self.precision)]).to(device)
         return voting_vector
 
-    def acquire_pts_source_and_ignore_regeion(self, h, w):
-        key = "{}_{}".format(h, w)
-        if key not in self.pts_source:
-            x = torch.arange(w, dtype=torch.long, device=self.device)
-            y = torch.arange(h, dtype=torch.long, device=self.device)
-            yy, xx = torch.meshgrid(y, x)
-
-            self.pts_source[key] = torch.stack([xx, yy], dim=-1)
-
-        if key not in self.ignore_regeion:
-            ignore_regeion = torch.zeros([h, w], device=self.device, dtype=torch.bool)
-            ignore_regeion[int(0.25810811 * h):int(0.99189189 * h)] = 1
-            self.ignore_regeion[key] = ignore_regeion
-
-        return self.pts_source[key], self.ignore_regeion[key]
-
-    def is_valid_pose(self, R, t):
-        if R[0, 0] < 0 or R[1, 1] < 0 or R[2, 2] < 0 or t[2] > 0:
-            return False
-        else:
-            return True
-
-    def pose_estimation(self, flow, depth, intrinsic, seed=None):
+    def pose_estimation(self, flow, depth, intrinsic, valid_regeion=None, seed=None):
         """
         flow: H x W x 2
         depth: H x W
         intrinsic: 3 x 3
+        valid_regeion: H x W
+        seed: random seed for reproduction
         """
         assert flow.ndim == 3 and depth.ndim == 2 and intrinsic.ndim == 2
         h, w = depth.shape
 
-        pts_source, ignore_regeion = self.acquire_pts_source_and_ignore_regeion(h, w)
+        x = torch.arange(w, dtype=torch.long, device=self.device)
+        y = torch.arange(h, dtype=torch.long, device=self.device)
+        yy, xx = torch.meshgrid(y, x)
+        pts_source = torch.stack([xx, yy], dim=-1)
 
         # Yield Correspondence
         xx_source, yy_source = torch.split(pts_source, 1, dim=-1)
@@ -92,18 +99,20 @@ class PoseEstimator(nn.Module):
         xx_source, yy_source, xx_target, yy_target = xx_source.squeeze(), yy_source.squeeze(), xx_target.squeeze(), yy_target.squeeze()
 
         # Ignore Regeion
-        ignore_regeion = ignore_regeion * (xx_target > 0) * (xx_target < w) * (yy_target > 0) * (yy_target < h) * (depth > 0)
+        if valid_regeion is None:
+            valid_regeion = torch.ones_like(depth)
+        valid_regeion = valid_regeion * (xx_target > 0) * (xx_target < w) * (yy_target > 0) * (yy_target < h) * (depth > 0)
 
         # Seeding for reproduction
         if seed is not None: np.random.seed(seed)
 
-        pts_idx = np.random.randint(0, torch.sum(ignore_regeion).item(), self.npts)
+        pts_idx = np.random.randint(0, torch.sum(valid_regeion).item(), self.npts)
 
         # Sample Correspondence
-        xxf_source, yyf_source = xx_source[ignore_regeion][pts_idx], yy_source[ignore_regeion][pts_idx]
-        xxf_target, yyf_target = xx_target[ignore_regeion][pts_idx], yy_target[ignore_regeion][pts_idx]
+        xxf_source, yyf_source = xx_source[valid_regeion][pts_idx], yy_source[valid_regeion][pts_idx]
+        xxf_target, yyf_target = xx_target[valid_regeion][pts_idx], yy_target[valid_regeion][pts_idx]
         pts_source, pts_target = torch.stack([xxf_source, yyf_source], axis=1).float(), torch.stack([xxf_target, yyf_target], axis=1).float()
-        depthf = depth[ignore_regeion][pts_idx]
+        depthf = depth[valid_regeion][pts_idx]
 
         pts_source, pts_target = kornia.geometry.conversions.convert_points_to_homogeneous(pts_source), kornia.geometry.conversions.convert_points_to_homogeneous(pts_target)
         pts_source_normed = pts_source @ intrinsic.inverse().T
@@ -111,23 +120,20 @@ class PoseEstimator(nn.Module):
 
         R, t, inliers = gpuepm_function(
             kornia.geometry.conversions.convert_points_from_homogeneous(pts_source_normed),
-            kornia.geometry.conversions.convert_points_from_homogeneous(pts_target_normed), ransac_iter=5, ransac_threshold=0.0001, num_test_chirality=10, topk=self.topk
+            kornia.geometry.conversions.convert_points_from_homogeneous(pts_target_normed), ransac_iter=5, ransac_threshold=self.ransac_threshold, num_test_chirality=10, topk=self.topk
         )
 
         if self.topk == 1:
             R, t = R.unsqueeze(0), t.unsqueeze(0)
 
-        if self.is_valid_pose(R[0], t[0]):
-            pose, scale = self.scale_estimation(intrinsic, R, t, pts_source, pts_target, depthf)
-            prj_inliers = self.projection_constraint(pts_source, pts_target, depthf, intrinsic, pose)
+        pose, scale = self.scale_estimation(intrinsic, R, t, pts_source, pts_target, depthf, inliers)
+        prj_inliers = self.projection_constraint(pts_source, pts_target, depthf, intrinsic, pose)
 
-            summed_inliers = torch.sum(inliers, 1) + prj_inliers * self.prj_w
+        summed_inliers = torch.sum(inliers, 1) + prj_inliers * self.prj_w
 
-            idx_best = torch.argmax(summed_inliers).item()
-            pose_best, scale_best = pose[idx_best], scale[idx_best]
-            return padding_pose(pose_best.unsqueeze(0)), scale_best
-        else:
-            return torch.eye(4).float().cuda(), 0
+        idx_best = torch.argmax(summed_inliers).item()
+        pose_best, scale_best = pose[idx_best], scale[idx_best]
+        return padding_pose(pose_best.unsqueeze(0)), scale_best
 
     def projection_constraint(self, pts_source, pts_target, depthf, intrinsic, pose):
         pts_source, pts_target, intrinsic, pose = pts_source.view([1, self.npts, 3]), pts_target.view([1, self.npts, 3]), padding_pose(intrinsic.view([1, 3, 3])), padding_pose(pose)
@@ -144,7 +150,7 @@ class PoseEstimator(nn.Module):
 
         return prj_inliers
 
-    def scale_estimation(self, intrinsic, R, t, pts_source, pts_target, depthf):
+    def scale_estimation(self, intrinsic, R, t, pts_source, pts_target, depthf, inliers):
         device = intrinsic.device
         pts_source, pts_target, depthf = pts_source.view([1, self.npts, 3]), pts_target.view([1, self.npts, 3]), depthf.view([1, self.npts, 1])
         intrinsic = intrinsic.view([1, 3, 3])
@@ -168,7 +174,7 @@ class PoseEstimator(nn.Module):
         # point_on_line_check = (epp_line * kornia.geometry.conversions.convert_points_to_homogeneous(pts_target_eppline)).sum(dim=-1).abs()
 
         target2prj_dist = ((pts_target_eppline - kornia.geometry.conversions.convert_points_from_homogeneous(pts_target)) ** 2 + self.eps).sum(dim=-1, keepdim=True).sqrt()
-        valid = target2prj_dist < self.scale_th
+        valid = (target2prj_dist < self.scale_th) * inliers.unsqueeze(2)
 
         pts_target_eppline_maxscale = pts_target_eppline + vec1 * (self.scale_th - target2prj_dist)
         # point_on_line_check = (epp_line * kornia.geometry.conversions.convert_points_to_homogeneous(pts_target_eppline_maxscale)).sum(dim=-1).abs()

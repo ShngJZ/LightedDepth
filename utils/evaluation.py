@@ -36,3 +36,14 @@ def compute_errors(gt, pred):
 
     sc_inv = scale_invariant(gt, pred)
     return [sc_inv, log10, silog, abs_rel, sq_rel, rms, log_rms, d1, d2, d3]
+
+def upgrade_measures(vdepth, gtdepth, selector, measures, SfM=False):
+    vdepthf = vdepth[selector == 1]
+    gtdepthf = gtdepth[selector == 1]
+
+    if SfM:
+        vdepthf = vdepthf * np.median(gtdepthf) / np.median(vdepthf)
+
+    measures[:10] += compute_errors(gt=gtdepthf, pred=vdepthf)
+    measures[10] += 1
+    return measures
